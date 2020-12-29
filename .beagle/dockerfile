@@ -1,0 +1,39 @@
+ARG BASE
+
+FROM ${BASE}
+
+ARG AUTHOR
+ARG VERSION
+
+LABEL maintainer=${AUTHOR} version=${VERSION}
+
+# Agent zipkin.thrift compact
+EXPOSE 5775/udp
+
+# Agent jaeger.thrift compact
+EXPOSE 6831/udp
+
+# Agent jaeger.thrift binary
+EXPOSE 6832/udp
+
+# Agent config HTTP
+EXPOSE 5778
+
+# Collector HTTP
+EXPOSE 14268
+
+# Collector gRPC
+EXPOSE 14250
+
+# Web HTTP
+EXPOSE 16686
+
+ARG TARGETOS
+ARG TARGETARCH
+
+COPY ./dist/all-in-one-$TARGETOS-$TARGETARCH /opt/jaeger/all-in-one
+COPY ./cmd/all-in-one/sampling_strategies.json /etc/jaeger/
+
+VOLUME ["/tmp"]
+ENTRYPOINT ["/opt/jaeger/all-in-one"]
+CMD ["--sampling.strategies-file=/etc/jaeger/sampling_strategies.json","--query.static-files=/opt/jaeger/www"]
