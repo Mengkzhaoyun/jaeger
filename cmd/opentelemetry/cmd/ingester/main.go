@@ -20,10 +20,8 @@ import (
 	"os"
 
 	"github.com/spf13/viper"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/config/configmodels"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/service"
-	"go.opentelemetry.io/collector/service/builder"
 
 	jflags "github.com/jaegertracing/jaeger/cmd/flags"
 	"github.com/jaegertracing/jaeger/cmd/opentelemetry/app"
@@ -42,8 +40,12 @@ func main() {
 		}
 	}
 
+	if err := app.RegisterMetricViews(); err != nil {
+		handleErr(err)
+	}
+
 	ver := version.Get()
-	info := service.ApplicationStartInfo{
+	info := component.ApplicationStartInfo{
 		ExeName:  "jaeger-opentelemetry-ingester",
 		LongName: "Jaeger OpenTelemetry Ingester",
 		Version:  ver.GitVersion,
@@ -56,35 +58,17 @@ func main() {
 	if storageType == "" {
 		storageType = "cassandra"
 	}
-
 	cmpts := defaultcomponents.Components(v)
-	cfgFactory := func(otelViper *viper.Viper, f config.Factories) (*configmodels.Config, error) {
-		cfgConfig := defaultconfig.ComponentSettings{
-			ComponentType: defaultconfig.Ingester,
-			Factories:     cmpts,
-			StorageType:   storageType,
-		}
-		cfg, err := cfgConfig.CreateDefaultConfig()
-		if err != nil {
-			return nil, err
-		}
-		if len(builder.GetConfigFile()) > 0 {
-			otelCfg, err := service.FileLoaderConfigFactory(otelViper, f)
-			if err != nil {
-				return nil, err
-			}
-			err = defaultconfig.MergeConfigs(cfg, otelCfg)
-			if err != nil {
-				return nil, err
-			}
-		}
-		return cfg, nil
+	cfgConfig := defaultconfig.ComponentSettings{
+		ComponentType: defaultconfig.Ingester,
+		Factories:     cmpts,
+		StorageType:   storageType,
 	}
 
 	svc, err := service.New(service.Parameters{
 		ApplicationStartInfo: info,
 		Factories:            cmpts,
-		ConfigFactory:        cfgFactory,
+		ConfigFactory:        cfgConfig.DefaultConfigFactory(v),
 	})
 	handleErr(err)
 
@@ -110,6 +94,6 @@ func main() {
 		handleErr(fmt.Errorf("could not load Jaeger configuration file %w", err))
 	}
 
-	err = svc.Start()
+	err = svc.Run()
 	handleErr(err)
 }

@@ -94,7 +94,7 @@ func (f *Factory) InitFromOptions(opts Options) {
 func (f *Factory) Initialize(metricsFactory metrics.Factory, logger *zap.Logger) error {
 	f.logger = logger
 
-	opts := badger.DefaultOptions
+	opts := badger.DefaultOptions("")
 	opts.TableLoadingMode = options.MemoryMap
 
 	if f.Options.Primary.Ephemeral {
@@ -170,6 +170,9 @@ func (f *Factory) CreateDependencyReader() (dependencystore.Reader, error) {
 // Close Implements io.Closer and closes the underlying storage
 func (f *Factory) Close() error {
 	close(f.maintenanceDone)
+	if f.store == nil {
+		return nil
+	}
 	err := f.store.Close()
 
 	// Remove tmp files if this was ephemeral storage

@@ -42,6 +42,7 @@ type ZipkinServerParams struct {
 // StartZipkinServer based on the given parameters
 func StartZipkinServer(params *ZipkinServerParams) (*http.Server, error) {
 	if params.HostPort == "" {
+		params.Logger.Info("Not listening for Zipkin HTTP traffic, port not configured")
 		return nil, nil
 	}
 
@@ -76,7 +77,9 @@ func serveZipkin(server *http.Server, listener net.Listener, params *ZipkinServe
 	server.Handler = cors.Handler(recoveryHandler(r))
 	go func(listener net.Listener, server *http.Server) {
 		if err := server.Serve(listener); err != nil {
-			params.Logger.Fatal("Could not launch Zipkin server", zap.Error(err))
+			if err != http.ErrServerClosed {
+				params.Logger.Fatal("Could not launch Zipkin server", zap.Error(err))
+			}
 		}
 		params.HealthCheck.Set(healthcheck.Unavailable)
 	}(listener, server)

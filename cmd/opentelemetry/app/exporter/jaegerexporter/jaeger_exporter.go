@@ -29,7 +29,7 @@ import (
 // For instance this enables using flags as default values in the config object.
 type Factory struct {
 	// Wrapped is Jaeger receiver.
-	Wrapped *jaegerexporter.Factory
+	Wrapped component.ExporterFactory
 	// Viper is used to get configuration values for default configuration
 	Viper *viper.Viper
 }
@@ -58,14 +58,14 @@ func (f Factory) CreateDefaultConfig() configmodels.Exporter {
 	return cfg
 }
 
-// CreateTraceExporter creates Jaeger trace exporter.
+// CreateTracesExporter creates Jaeger trace exporter.
 // This function implements OTEL component.ExporterFactory interface.
-func (f Factory) CreateTraceExporter(
+func (f Factory) CreateTracesExporter(
 	ctx context.Context,
 	params component.ExporterCreateParams,
 	cfg configmodels.Exporter,
-) (component.TraceExporter, error) {
-	return f.Wrapped.CreateTraceExporter(ctx, params, cfg)
+) (component.TracesExporter, error) {
+	return f.Wrapped.CreateTracesExporter(ctx, params, cfg)
 }
 
 // CreateMetricsExporter creates a metrics exporter based on provided config.
@@ -76,4 +76,14 @@ func (f Factory) CreateMetricsExporter(
 	cfg configmodels.Exporter,
 ) (component.MetricsExporter, error) {
 	return f.Wrapped.CreateMetricsExporter(ctx, params, cfg)
+}
+
+// CreateLogsExporter creates a metrics exporter based on provided config.
+// This function implements component.ExporterFactory.
+func (f Factory) CreateLogsExporter(
+	ctx context.Context,
+	params component.ExporterCreateParams,
+	cfg configmodels.Exporter,
+) (component.LogsExporter, error) {
+	return f.Wrapped.CreateLogsExporter(ctx, params, cfg)
 }

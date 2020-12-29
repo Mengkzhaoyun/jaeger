@@ -17,77 +17,143 @@ package kafkareceiver
 import (
 	"context"
 
-	"github.com/uber/jaeger-lib/metrics"
+	"github.com/Shopify/sarama"
+	"github.com/spf13/viper"
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/config/configmodels"
+	"go.opentelemetry.io/collector/config/configtls"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/obsreport"
-	jaegertranslator "go.opentelemetry.io/collector/translator/trace/jaeger"
-	"go.uber.org/zap"
+	"go.opentelemetry.io/collector/exporter/kafkaexporter"
+	"go.opentelemetry.io/collector/receiver/kafkareceiver"
 
-	"github.com/jaegertracing/jaeger/cmd/ingester/app/builder"
-	ingester "github.com/jaegertracing/jaeger/cmd/ingester/app/consumer"
-	"github.com/jaegertracing/jaeger/model"
-	"github.com/jaegertracing/jaeger/storage/spanstore"
+	ingesterApp "github.com/jaegertracing/jaeger/cmd/ingester/app"
+	"github.com/jaegertracing/jaeger/plugin/storage/kafka"
 )
 
-func new(
-	config *Config,
-	nextConsumer consumer.TraceConsumer,
+// TypeStr defines receiver type.
+const TypeStr = "kafka"
+
+// Factory wraps kafkareceiver.Factory and makes the default config configurable via viper.
+// For instance this enables using flags as default values in the config object.
+type Factory struct {
+	// Wrapped is Kafka receiver.
+	Wrapped component.ReceiverFactory
+	// Viper is used to get configuration values for default configuration
+	Viper *viper.Viper
+}
+
+var _ component.ReceiverFactory = (*Factory)(nil)
+
+// Type returns the type of the receiver.
+func (f *Factory) Type() configmodels.Type {
+	return f.Wrapped.Type()
+}
+
+// CreateDefaultConfig returns default configuration of Factory.
+// This function implements OTEL component.ReceiverFactoryBase interface.
+func (f *Factory) CreateDefaultConfig() configmodels.Receiver {
+	cfg := f.Wrapped.CreateDefaultConfig().(*kafkareceiver.Config)
+	// load jaeger config
+	opts := &ingesterApp.Options{}
+	opts.InitFromViper(f.Viper)
+
+	cfg.Brokers = opts.Brokers
+	cfg.ClientID = opts.ClientID
+	cfg.Encoding = mustOtelEncodingForJaegerEncoding(opts.Encoding)
+	cfg.GroupID = opts.GroupID
+	cfg.Topic = opts.Topic
+	cfg.ProtocolVersion = opts.ProtocolVersion
+
+	// kafka consumer groups require a min version of V0_10_2_0.  if no version is specified
+	//  we will assume this
+	if len(cfg.ProtocolVersion) == 0 {
+		cfg.ProtocolVersion = sarama.V0_10_2_0.String()
+	}
+
+	if opts.Authentication == "kerberos" {
+		cfg.Authentication.Kerberos = &kafkaexporter.KerberosConfig{
+			ServiceName: opts.Kerberos.ServiceName,
+			Realm:       opts.Kerberos.Realm,
+			UseKeyTab:   opts.Kerberos.UseKeyTab,
+			Username:    opts.Kerberos.Username,
+			Password:    opts.Kerberos.Password,
+			ConfigPath:  opts.Kerberos.ConfigPath,
+			KeyTabPath:  opts.Kerberos.KeyTabPath,
+		}
+	}
+
+	if opts.Authentication == "plaintext" {
+		cfg.Authentication.PlainText = &kafkaexporter.PlainTextConfig{
+			Username: opts.PlainText.UserName,
+			Password: opts.PlainText.Password,
+		}
+	}
+
+	if opts.Authentication == "tls" && opts.TLS.Enabled {
+		cfg.Authentication.TLS = &configtls.TLSClientSetting{
+			TLSSetting: configtls.TLSSetting{
+				CAFile:   opts.TLS.CAPath,
+				CertFile: opts.TLS.CertPath,
+				KeyFile:  opts.TLS.KeyPath,
+			},
+			ServerName: opts.TLS.ServerName,
+			Insecure:   opts.TLS.SkipHostVerify,
+		}
+	}
+
+	return cfg
+}
+
+// CreateTracesReceiver creates Jaeger receiver trace receiver.
+// This function implements OTEL component.ReceiverFactory interface.
+func (f *Factory) CreateTracesReceiver(
+	ctx context.Context,
 	params component.ReceiverCreateParams,
-) (component.TraceReceiver, error) {
-	ctx := obsreport.ReceiverContext(
-		context.Background(), config.Name(), "kafka", "kafka")
-	ctx = obsreport.StartTraceDataReceiveOp(
-		ctx, TypeStr, "kafka")
-	w := &writer{
-		ctx:          ctx,
-		nextConsumer: nextConsumer,
+	cfg configmodels.Receiver,
+	nextConsumer consumer.TracesConsumer,
+) (component.TracesReceiver, error) {
+	return f.Wrapped.CreateTracesReceiver(ctx, params, cfg, nextConsumer)
+}
+
+// CreateMetricsReceiver creates a metrics receiver based on provided config.
+// This function implements component.ReceiverFactory.
+func (f *Factory) CreateMetricsReceiver(
+	ctx context.Context,
+	params component.ReceiverCreateParams,
+	cfg configmodels.Receiver,
+	nextConsumer consumer.MetricsConsumer,
+) (component.MetricsReceiver, error) {
+	return f.Wrapped.CreateMetricsReceiver(ctx, params, cfg, nextConsumer)
+}
+
+// CreateLogsReceiver creates a receiver based on the config.
+// If the receiver type does not support logs or if the config is not valid
+// error will be returned instead.
+func (f Factory) CreateLogsReceiver(
+	ctx context.Context,
+	params component.ReceiverCreateParams,
+	cfg configmodels.Receiver,
+	nextConsumer consumer.LogsConsumer,
+) (component.LogsReceiver, error) {
+	return f.Wrapped.CreateLogsReceiver(ctx, params, cfg, nextConsumer)
+}
+
+// mustOtelEncodingForJaegerEncoding translates a jaeger encoding to a otel encoding
+func mustOtelEncodingForJaegerEncoding(jaegerEncoding string) string {
+	switch jaegerEncoding {
+	case kafka.EncodingProto:
+		return "jaeger_proto"
+	case kafka.EncodingJSON:
+		return "jaeger_json"
+	case encodingOTLPProto:
+		return "otlp_proto"
+	case encodingZipkinProto:
+		return "zipkin_proto"
+	case encodingZipkinJSON:
+		return "zipkin_json"
+	case kafka.EncodingZipkinThrift:
+		return "zipkin_thrift"
 	}
-	consumer, err := builder.CreateConsumer(
-		params.Logger,
-		metrics.NullFactory,
-		w,
-		config.Options)
-	if err != nil {
-		return nil, err
-	}
-	return &kafkaReceiver{
-		consumer: consumer,
-		logger:   params.Logger,
-	}, nil
-}
 
-type kafkaReceiver struct {
-	logger   *zap.Logger
-	consumer *ingester.Consumer
-}
-
-var _ component.Receiver = (*kafkaReceiver)(nil)
-
-// Start starts the receiver.
-func (r kafkaReceiver) Start(_ context.Context, _ component.Host) error {
-	r.consumer.Start()
-	return nil
-}
-
-// Shutdown shutdowns the receiver.
-func (r kafkaReceiver) Shutdown(_ context.Context) error {
-	return r.consumer.Close()
-}
-
-type writer struct {
-	nextConsumer consumer.TraceConsumer
-	ctx          context.Context
-}
-
-var _ spanstore.Writer = (*writer)(nil)
-
-// WriteSpan writes a span to the next consumer.
-func (w writer) WriteSpan(span *model.Span) error {
-	batch := model.Batch{
-		Spans:   []*model.Span{span},
-		Process: span.Process,
-	}
-	traces := jaegertranslator.ProtoBatchToInternalTraces(batch)
-	return w.nextConsumer.ConsumeTraces(w.ctx, traces)
+	panic(jaegerEncoding + " is not a supported kafka encoding in the OTEL collector.")
 }

@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/collector/config/configerror"
 	"go.opentelemetry.io/collector/config/configmodels"
 
+	collector_app "github.com/jaegertracing/jaeger/cmd/collector/app"
 	jConfig "github.com/jaegertracing/jaeger/pkg/config"
 	"github.com/jaegertracing/jaeger/plugin/storage/cassandra"
 )
@@ -36,21 +37,17 @@ func TestCreateTraceExporter(t *testing.T) {
 	factory := Factory{OptionsFactory: func() *cassandra.Options {
 		return opts
 	}}
-	exporter, err := factory.CreateTraceExporter(context.Background(), component.ExporterCreateParams{}, factory.CreateDefaultConfig())
+	exporter, err := factory.CreateTracesExporter(context.Background(), component.ExporterCreateParams{}, factory.CreateDefaultConfig())
 	require.Nil(t, exporter)
 	assert.Contains(t, err.Error(), "gocql: unable to create session")
-}
-
-func TestCreateTraceExporter_NilConfig(t *testing.T) {
-	factory := Factory{}
-	exporter, err := factory.CreateTraceExporter(context.Background(), component.ExporterCreateParams{}, nil)
-	require.Nil(t, exporter)
-	assert.Contains(t, err.Error(), "could not cast configuration to jaeger_cassandra")
 }
 
 func TestCreateDefaultConfig(t *testing.T) {
 	factory := Factory{OptionsFactory: DefaultOptions}
 	cfg := factory.CreateDefaultConfig()
+
+	assert.Equal(t, collector_app.DefaultNumWorkers, cfg.(*Config).NumConsumers)
+	assert.Equal(t, collector_app.DefaultQueueSize, cfg.(*Config).QueueSize)
 	assert.NotNil(t, cfg, "failed to create default config")
 	assert.NoError(t, configcheck.ValidateConfig(cfg))
 }

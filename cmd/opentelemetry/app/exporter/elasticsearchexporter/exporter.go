@@ -15,26 +15,35 @@
 package elasticsearchexporter
 
 import (
+	"context"
+
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
 
 	"github.com/jaegertracing/jaeger/plugin/storage/es"
 )
 
-// new creates Elasticsearch exporter/storage.
-func new(config *Config, params component.ExporterCreateParams) (component.TraceExporter, error) {
+// newExporter creates Elasticsearch exporter/storage.
+func newExporter(ctx context.Context, config *Config, params component.ExporterCreateParams) (component.TracesExporter, error) {
 	esCfg := config.GetPrimary()
-	w, err := newEsSpanWriter(*esCfg, params.Logger)
+	w, err := newEsSpanWriter(*esCfg, params.Logger, false, config.Name())
 	if err != nil {
 		return nil, err
 	}
 	if config.Primary.IsCreateIndexTemplates() {
-		spanMapping, serviceMapping := es.GetSpanServiceMappings(esCfg.GetNumShards(), esCfg.GetNumReplicas(), esCfg.GetVersion())
-		if err = w.CreateTemplates(spanMapping, serviceMapping); err != nil {
+		spanMapping, serviceMapping := es.GetSpanServiceMappings(esCfg.GetNumShards(), esCfg.GetNumReplicas(), uint(w.esClientVersion()))
+		if err = w.CreateTemplates(ctx, spanMapping, serviceMapping); err != nil {
 			return nil, err
 		}
 	}
 	return exporterhelper.NewTraceExporter(
 		config,
-		w.WriteTraces)
+		params.Logger,
+		w.WriteTraces,
+		exporterhelper.WithTimeout(config.TimeoutSettings),
+		exporterhelper.WithQueue(config.QueueSettings),
+		exporterhelper.WithRetry(config.RetrySettings),
+		exporterhelper.WithShutdown(func(ctx context.Context) error {
+			return esCfg.TLS.Close()
+		}))
 }

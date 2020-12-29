@@ -16,12 +16,13 @@ package cassandraexporter
 
 import (
 	"context"
-	"fmt"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configerror"
 	"go.opentelemetry.io/collector/config/configmodels"
+	"go.opentelemetry.io/collector/exporter/exporterhelper"
 
+	collector_app "github.com/jaegertracing/jaeger/cmd/collector/app"
 	"github.com/jaegertracing/jaeger/plugin/storage/cassandra"
 )
 
@@ -54,26 +55,30 @@ func (Factory) Type() configmodels.Type {
 // This function implements OTEL component.ExporterFactoryBase interface.
 func (f Factory) CreateDefaultConfig() configmodels.Exporter {
 	opts := f.OptionsFactory()
+	queueSettings := exporterhelper.CreateDefaultQueueSettings()
+	queueSettings.NumConsumers = collector_app.DefaultNumWorkers
+	queueSettings.QueueSize = collector_app.DefaultQueueSize
+
 	return &Config{
-		Options: *opts,
 		ExporterSettings: configmodels.ExporterSettings{
 			TypeVal: TypeStr,
 			NameVal: TypeStr,
 		},
+		TimeoutSettings: exporterhelper.CreateDefaultTimeoutSettings(),
+		RetrySettings:   exporterhelper.CreateDefaultRetrySettings(),
+		QueueSettings:   queueSettings,
+		Options:         *opts,
 	}
 }
 
-// CreateTraceExporter creates Jaeger Cassandra trace exporter.
+// CreateTracesExporter creates Jaeger Cassandra trace exporter.
 // This function implements OTEL component.ExporterFactory interface.
-func (f Factory) CreateTraceExporter(
+func (f Factory) CreateTracesExporter(
 	_ context.Context,
 	params component.ExporterCreateParams,
 	cfg configmodels.Exporter,
-) (component.TraceExporter, error) {
-	config, ok := cfg.(*Config)
-	if !ok {
-		return nil, fmt.Errorf("could not cast configuration to %s", TypeStr)
-	}
+) (component.TracesExporter, error) {
+	config := cfg.(*Config)
 	return new(config, params)
 }
 
@@ -84,5 +89,15 @@ func (Factory) CreateMetricsExporter(
 	_ component.ExporterCreateParams,
 	_ configmodels.Exporter,
 ) (component.MetricsExporter, error) {
+	return nil, configerror.ErrDataTypeIsNotSupported
+}
+
+// CreateLogsExporter creates a metrics exporter based on provided config.
+// This function implements component.ExporterFactory.
+func (f Factory) CreateLogsExporter(
+	ctx context.Context,
+	params component.ExporterCreateParams,
+	cfg configmodels.Exporter,
+) (component.LogsExporter, error) {
 	return nil, configerror.ErrDataTypeIsNotSupported
 }

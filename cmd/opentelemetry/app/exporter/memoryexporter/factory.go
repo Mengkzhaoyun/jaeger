@@ -78,18 +78,18 @@ func (f Factory) CreateDefaultConfig() configmodels.Exporter {
 	}
 }
 
-// CreateTraceExporter creates Jaeger Kafka trace exporter.
+// CreateTracesExporter creates Jaeger Kafka trace exporter.
 // This function implements OTEL component.ExporterFactory interface.
-func (f Factory) CreateTraceExporter(
+func (f Factory) CreateTracesExporter(
 	_ context.Context,
 	params component.ExporterCreateParams,
 	cfg configmodels.Exporter,
-) (component.TraceExporter, error) {
+) (component.TracesExporter, error) {
 	factory, err := f.createStorageFactory(params, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return exporter.NewSpanWriterExporter(cfg, factory)
+	return exporter.NewSpanWriterExporter(cfg, params, factory)
 }
 
 // CreateMetricsExporter is not implemented.
@@ -102,12 +102,23 @@ func (Factory) CreateMetricsExporter(
 	return nil, configerror.ErrDataTypeIsNotSupported
 }
 
+// CreateLogsExporter creates a metrics exporter based on provided config.
+// This function implements component.ExporterFactory.
+func (f Factory) CreateLogsExporter(
+	ctx context.Context,
+	params component.ExporterCreateParams,
+	cfg configmodels.Exporter,
+) (component.LogsExporter, error) {
+	return nil, configerror.ErrDataTypeIsNotSupported
+}
+
 func (f Factory) createStorageFactory(params component.ExporterCreateParams, cfg configmodels.Exporter) (storage.Factory, error) {
 	config, ok := cfg.(*Config)
 	if !ok {
 		return nil, fmt.Errorf("could not cast configuration to %s", TypeStr)
 	}
 	f.mutex.Lock()
+	defer f.mutex.Unlock()
 	if instance != nil {
 		return instance, nil
 	}
@@ -118,6 +129,5 @@ func (f Factory) createStorageFactory(params component.ExporterCreateParams, cfg
 		return nil, err
 	}
 	instance = factory
-	f.mutex.Unlock()
 	return factory, nil
 }

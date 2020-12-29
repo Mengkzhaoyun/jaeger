@@ -15,6 +15,7 @@
 package esmodeltranslator
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -61,40 +62,72 @@ func NewTranslator(allTagsAsFields bool, tagsKeysAsFields []string, tagDotReplac
 	}
 }
 
+// ConvertedData holds DB span and the original data used to construct it.
+type ConvertedData struct {
+	Span                   pdata.Span
+	Resource               pdata.Resource
+	InstrumentationLibrary pdata.InstrumentationLibrary
+	DBSpan                 *dbmodel.Span
+}
+
 // ConvertSpans converts spans from OTEL model to Jaeger Elasticsearch model
-func (c *Translator) ConvertSpans(traces pdata.Traces) ([]*dbmodel.Span, error) {
+func (c *Translator) ConvertSpans(traces pdata.Traces) ([]ConvertedData, error) {
 	rss := traces.ResourceSpans()
 	if rss.Len() == 0 {
 		return nil, nil
 	}
-	dbSpans := make([]*dbmodel.Span, 0, traces.SpanCount())
+	spansData := make([]ConvertedData, 0, traces.SpanCount())
 	for i := 0; i < rss.Len(); i++ {
 		// this would correspond to a single batch
-		err := c.resourceSpans(rss.At(i), &dbSpans)
+		err := c.resourceSpans(rss.At(i), &spansData)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return dbSpans, nil
+	return spansData, nil
 }
 
-func (c *Translator) resourceSpans(spans pdata.ResourceSpans, dbSpans *[]*dbmodel.Span) error {
-	ils := spans.InstrumentationLibrarySpans()
-	process := c.process(spans.Resource())
+func (c *Translator) resourceSpans(rspans pdata.ResourceSpans, spansData *[]ConvertedData) error {
+	ils := rspans.InstrumentationLibrarySpans()
+	process := c.process(rspans.Resource())
 	for i := 0; i < ils.Len(); i++ {
-		// TODO convert instrumentation library info
-		//ils.At(i).InstrumentationLibrary()
 		spans := ils.At(i).Spans()
 		for j := 0; j < spans.Len(); j++ {
 			dbSpan, err := c.spanWithoutProcess(spans.At(j))
 			if err != nil {
 				return err
 			}
+			c.addInstrumentationLibrary(dbSpan, ils.At(i).InstrumentationLibrary())
 			dbSpan.Process = *process
-			*dbSpans = append(*dbSpans, dbSpan)
+			*spansData = append(*spansData, ConvertedData{
+				Span:                   spans.At(j),
+				Resource:               rspans.Resource(),
+				InstrumentationLibrary: ils.At(i).InstrumentationLibrary(),
+				DBSpan:                 dbSpan,
+			})
 		}
 	}
 	return nil
+}
+
+func (c *Translator) addInstrumentationLibrary(span *dbmodel.Span, instLib pdata.InstrumentationLibrary) {
+	if instLib.IsNil() {
+		return
+	}
+	if instLib.Name() != "" {
+		span.Tags = append(span.Tags, dbmodel.KeyValue{
+			Key:   tracetranslator.TagInstrumentationName,
+			Type:  dbmodel.StringType,
+			Value: instLib.Name(),
+		})
+	}
+	if instLib.Version() != "" {
+		span.Tags = append(span.Tags, dbmodel.KeyValue{
+			Key:   tracetranslator.TagInstrumentationVersion,
+			Type:  dbmodel.StringType,
+			Value: instLib.Version(),
+		})
+	}
 }
 
 func (c *Translator) spanWithoutProcess(span pdata.Span) (*dbmodel.Span, error) {
@@ -135,7 +168,7 @@ func toTime(nano pdata.TimestampUnixNano) time.Time {
 }
 
 func references(links pdata.SpanLinkSlice, parentSpanID pdata.SpanID, traceID dbmodel.TraceID) ([]dbmodel.Reference, error) {
-	parentSpanIDSet := len(parentSpanID.Bytes()) != 0
+	parentSpanIDSet := parentSpanID.IsValid()
 	if !parentSpanIDSet && links.Len() == 0 {
 		return emptyReferenceList, nil
 	}
@@ -190,24 +223,20 @@ func references(links pdata.SpanLinkSlice, parentSpanID pdata.SpanID, traceID db
 }
 
 func convertSpanID(spanID pdata.SpanID) (dbmodel.SpanID, error) {
-	spanIDInt, err := tracetranslator.BytesToUInt64SpanID(spanID)
-	if err != nil {
-		return "", err
-	}
-	if spanIDInt == 0 {
+	if !spanID.IsValid() {
 		return "", errZeroSpanID
 	}
-	return dbmodel.SpanID(fmt.Sprintf("%016x", spanIDInt)), nil
+	src := spanID.Bytes()
+	dst := make([]byte, hex.EncodedLen(len(src)))
+	hex.Encode(dst, src[:])
+	return dbmodel.SpanID(dst), nil
 }
 
 func convertTraceID(traceID pdata.TraceID) (dbmodel.TraceID, error) {
-	high, low, err := tracetranslator.BytesToUInt64TraceID(traceID)
-	if err != nil {
-		return "", err
-	}
-	if low == 0 && high == 0 {
+	if !traceID.IsValid() {
 		return "", errZeroTraceID
 	}
+	high, low := tracetranslator.BytesToUInt64TraceID(traceID.Bytes())
 	return dbmodel.TraceID(traceIDToString(high, low)), nil
 }
 
@@ -335,8 +364,7 @@ func getTagFromSpanKind(spanKind pdata.SpanKind) (dbmodel.KeyValue, bool) {
 
 func getTagFromStatusCode(statusCode pdata.StatusCode) (dbmodel.KeyValue, bool) {
 	return dbmodel.KeyValue{
-		Key: tracetranslator.TagStatusCode,
-		// TODO is this ok?
+		Key:   tracetranslator.TagStatusCode,
 		Value: statusCode.String(),
 		Type:  dbmodel.StringType,
 	}, true

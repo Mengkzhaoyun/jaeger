@@ -16,11 +16,11 @@ package grpcpluginexporter
 
 import (
 	"context"
-	"fmt"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configerror"
 	"go.opentelemetry.io/collector/config/configmodels"
+	"go.opentelemetry.io/collector/exporter/exporterhelper"
 
 	storageGrpc "github.com/jaegertracing/jaeger/plugin/storage/grpc"
 )
@@ -53,25 +53,26 @@ func (f Factory) Type() configmodels.Type {
 func (f Factory) CreateDefaultConfig() configmodels.Exporter {
 	opts := f.OptionsFactory()
 	return &Config{
-		Options: *opts,
 		ExporterSettings: configmodels.ExporterSettings{
 			TypeVal: TypeStr,
 			NameVal: TypeStr,
 		},
+		TimeoutSettings: exporterhelper.CreateDefaultTimeoutSettings(),
+		RetrySettings:   exporterhelper.CreateDefaultRetrySettings(),
+		QueueSettings:   exporterhelper.CreateDefaultQueueSettings(),
+
+		Options: *opts,
 	}
 }
 
-// CreateTraceExporter creates Jaeger gRPC trace exporter.
+// CreateTracesExporter creates Jaeger gRPC trace exporter.
 // This function implements OTEL component.ExporterFactory interface.
-func (f Factory) CreateTraceExporter(
+func (f Factory) CreateTracesExporter(
 	_ context.Context,
 	params component.ExporterCreateParams,
 	cfg configmodels.Exporter,
-) (component.TraceExporter, error) {
-	grpcCfg, ok := cfg.(*Config)
-	if !ok {
-		return nil, fmt.Errorf("could not cast configuration to %s", TypeStr)
-	}
+) (component.TracesExporter, error) {
+	grpcCfg := cfg.(*Config)
 	return new(grpcCfg, params)
 }
 
@@ -82,5 +83,15 @@ func (f Factory) CreateMetricsExporter(
 	_ component.ExporterCreateParams,
 	_ configmodels.Exporter,
 ) (component.MetricsExporter, error) {
+	return nil, configerror.ErrDataTypeIsNotSupported
+}
+
+// CreateLogsExporter creates a metrics exporter based on provided config.
+// This function implements component.ExporterFactory.
+func (f Factory) CreateLogsExporter(
+	ctx context.Context,
+	params component.ExporterCreateParams,
+	cfg configmodels.Exporter,
+) (component.LogsExporter, error) {
 	return nil, configerror.ErrDataTypeIsNotSupported
 }

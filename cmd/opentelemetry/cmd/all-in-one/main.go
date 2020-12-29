@@ -22,18 +22,16 @@ import (
 	"strings"
 
 	"github.com/opentracing/opentracing-go"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	jaegerClientConfig "github.com/uber/jaeger-client-go/config"
 	jaegerClientZapLog "github.com/uber/jaeger-client-go/log/zap"
 	"github.com/uber/jaeger-lib/metrics"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/configmodels"
 	"go.opentelemetry.io/collector/service"
-	"go.opentelemetry.io/collector/service/builder"
 	"go.uber.org/zap"
 
-	collectorApp "github.com/jaegertracing/jaeger/cmd/collector/app"
 	jflags "github.com/jaegertracing/jaeger/cmd/flags"
 	"github.com/jaegertracing/jaeger/cmd/opentelemetry/app"
 	"github.com/jaegertracing/jaeger/cmd/opentelemetry/app/defaultcomponents"
@@ -46,6 +44,7 @@ import (
 	queryApp "github.com/jaegertracing/jaeger/cmd/query/app"
 	"github.com/jaegertracing/jaeger/cmd/query/app/querysvc"
 	jConfig "github.com/jaegertracing/jaeger/pkg/config"
+	"github.com/jaegertracing/jaeger/pkg/multicloser"
 	"github.com/jaegertracing/jaeger/pkg/version"
 	pluginStorage "github.com/jaegertracing/jaeger/plugin/storage"
 	cassandraStorage "github.com/jaegertracing/jaeger/plugin/storage/cassandra"
@@ -61,8 +60,10 @@ func main() {
 		}
 	}
 
+	handleErr(app.RegisterMetricViews())
+
 	ver := version.Get()
-	info := service.ApplicationStartInfo{
+	info := component.ApplicationStartInfo{
 		ExeName:  "jaeger-opentelemetry-all-in-one",
 		LongName: "Jaeger OpenTelemetry all-in-one",
 		Version:  ver.GitVersion,
@@ -76,46 +77,24 @@ func main() {
 	}
 
 	cmpts := defaultcomponents.Components(v)
-	cfgFactory := func(otelViper *viper.Viper, f config.Factories) (*configmodels.Config, error) {
-		collectorOpts := &collectorApp.CollectorOptions{}
-		collectorOpts.InitFromViper(v)
-		cfgOpts := defaultconfig.ComponentSettings{
-			ComponentType:  defaultconfig.AllInOne,
-			Factories:      cmpts,
-			StorageType:    storageType,
-			ZipkinHostPort: collectorOpts.CollectorZipkinHTTPHostPort,
-		}
-		cfg, err := cfgOpts.CreateDefaultConfig()
-		if err != nil {
-			return nil, err
-		}
-
-		if len(builder.GetConfigFile()) > 0 {
-			otelCfg, err := service.FileLoaderConfigFactory(otelViper, f)
-			if err != nil {
-				return nil, err
-			}
-			err = defaultconfig.MergeConfigs(cfg, otelCfg)
-			if err != nil {
-				return nil, err
-			}
-		}
-		return cfg, nil
+	cfgConfig := defaultconfig.ComponentSettings{
+		ComponentType: defaultconfig.AllInOne,
+		Factories:     cmpts,
+		StorageType:   storageType,
 	}
 
 	svc, err := service.New(service.Parameters{
 		ApplicationStartInfo: info,
 		Factories:            cmpts,
-		ConfigFactory:        cfgFactory,
+		ConfigFactory:        cfgConfig.DefaultConfigFactory(v),
 	})
 	handleErr(err)
 
 	// Add Jaeger specific flags to service command
 	// this passes flag values to viper.
 	storageFlags, err := app.AddStorageFlags(storageType, true)
-	if err != nil {
-		handleErr(err)
-	}
+	handleErr(err)
+
 	cmd := svc.Command()
 	jConfig.AddFlags(v,
 		cmd,
@@ -125,15 +104,19 @@ func main() {
 	)
 
 	// parse flags to propagate Jaeger config file flag value to viper
-	cmd.ParseFlags(os.Args)
+	parseErr := cmd.ParseFlags(os.Args)
 	err = jflags.TryLoadConfigFile(v)
 	if err != nil {
 		handleErr(fmt.Errorf("could not load Jaeger configuration file %w", err))
 	}
 
 	go func() {
-		err = svc.Start()
-		handleErr(err)
+		handleErr(svc.Run())
+
+		if parseErr == pflag.ErrHelp {
+			os.Exit(0)
+		}
+
 	}()
 
 	for state := range svc.GetStateChannel() {
@@ -145,17 +128,14 @@ func main() {
 	if exp == nil {
 		svc.ReportFatalError(fmt.Errorf("exporter type for storage %s not found", storageType))
 	}
-	queryServer, tracerCloser, err := startQuery(v, svc.GetLogger(), exp)
+	closer, err := startQuery(v, svc.GetLogger(), exp)
 	if err != nil {
 		svc.ReportFatalError(err)
 	}
 	for state := range svc.GetStateChannel() {
 		if state == service.Closing {
-			if queryServer != nil {
-				queryServer.Close()
-			}
-			if tracerCloser != nil {
-				tracerCloser.Close()
+			if closer != nil {
+				closer.Close()
 			}
 		} else if state == service.Closed {
 			break
@@ -177,18 +157,18 @@ func getStorageExporter(storageType string, exporters map[configmodels.Exporter]
 	return nil
 }
 
-func startQuery(v *viper.Viper, logger *zap.Logger, exporter configmodels.Exporter) (*queryApp.Server, io.Closer, error) {
+func startQuery(v *viper.Viper, logger *zap.Logger, exporter configmodels.Exporter) (io.Closer, error) {
 	storageFactory, err := getFactory(exporter, v, logger)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	spanReader, err := storageFactory.CreateSpanReader()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	dependencyReader, err := storageFactory.CreateDependencyReader()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	queryOpts := new(queryApp.QueryOptions).InitFromViper(v, logger)
 	queryServiceOptions := queryOpts.BuildQueryServiceOptions(storageFactory, logger)
@@ -200,12 +180,16 @@ func startQuery(v *viper.Viper, logger *zap.Logger, exporter configmodels.Export
 	tracerCloser := initTracer(logger)
 	server, err := queryApp.NewServer(logger, queryService, queryOpts, opentracing.GlobalTracer())
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := server.Start(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return server, tracerCloser, nil
+	var storageCloser io.Closer
+	if closer, ok := storageFactory.(io.Closer); ok {
+		storageCloser = closer
+	}
+	return multicloser.Wrap(tracerCloser, server, storageCloser), nil
 }
 
 func getFactory(exporter configmodels.Exporter, v *viper.Viper, logger *zap.Logger) (storage.Factory, error) {
@@ -214,12 +198,8 @@ func getFactory(exporter configmodels.Exporter, v *viper.Viper, logger *zap.Logg
 		archiveOpts := esStorage.NewOptions("es-archive")
 		archiveOpts.InitFromViper(v)
 		primaryConfig := exporter.(*elasticsearchexporter.Config)
-		f := esStorage.NewFactory()
-		f.InitFromOptions(*esStorage.NewOptionsFromConfig(primaryConfig.Primary.Configuration, archiveOpts.Primary.Configuration))
-		if err := f.Initialize(metrics.NullFactory, logger); err != nil {
-			return nil, err
-		}
-		return f, nil
+		opts := esStorage.NewOptionsFromConfig(primaryConfig.Primary.Configuration, archiveOpts.Primary.Configuration)
+		return elasticsearchexporter.NewStorageFactory(opts, logger, primaryConfig.Name()), nil
 	case "jaeger_cassandra":
 		archiveOpts := cassandraStorage.NewOptions("cassandra-archive")
 		archiveOpts.InitFromViper(v)

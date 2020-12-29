@@ -22,31 +22,35 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uber/jaeger-lib/metrics"
+	"go.opencensus.io/stats/view"
+	"go.opencensus.io/tag"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configmodels"
 	"go.opentelemetry.io/collector/consumer/pdata"
 	"go.uber.org/zap"
 
+	"github.com/jaegertracing/jaeger/cmd/opentelemetry/app/exporter/storagemetrics"
 	"github.com/jaegertracing/jaeger/model"
 	"github.com/jaegertracing/jaeger/storage/dependencystore"
 	"github.com/jaegertracing/jaeger/storage/spanstore"
 )
 
 func TestNew_closableWriter(t *testing.T) {
-	exporter, err := NewSpanWriterExporter(&configmodels.ExporterSettings{}, mockStorageFactory{spanWriter: spanWriter{}})
+	exporter, err := NewSpanWriterExporter(&configmodels.ExporterSettings{}, component.ExporterCreateParams{Logger: zap.NewNop()}, mockStorageFactory{spanWriter: spanWriter{}})
 	require.NoError(t, err)
 	assert.NotNil(t, exporter)
 	assert.Nil(t, exporter.Shutdown(context.Background()))
 }
 
 func TestNew_noClosableWriter(t *testing.T) {
-	exporter, err := NewSpanWriterExporter(&configmodels.ExporterSettings{}, mockStorageFactory{spanWriter: noClosableWriter{}})
+	exporter, err := NewSpanWriterExporter(&configmodels.ExporterSettings{}, component.ExporterCreateParams{Logger: zap.NewNop()}, mockStorageFactory{spanWriter: noClosableWriter{}})
 	require.NoError(t, err)
 	assert.NotNil(t, exporter)
 	assert.Nil(t, exporter.Shutdown(context.Background()))
 }
 
 func TestNew_failedToCreateWriter(t *testing.T) {
-	exporter, err := NewSpanWriterExporter(&configmodels.ExporterSettings{}, mockStorageFactory{err: errors.New("failed to create writer"), spanWriter: spanWriter{}})
+	exporter, err := NewSpanWriterExporter(&configmodels.ExporterSettings{}, component.ExporterCreateParams{Logger: zap.NewNop()}, mockStorageFactory{err: errors.New("failed to create writer"), spanWriter: spanWriter{}})
 	require.Nil(t, exporter)
 	assert.Error(t, err, "failed to create writer")
 }
@@ -58,7 +62,7 @@ func traces() pdata.Traces {
 	return traces
 }
 
-func AddSpan(traces pdata.Traces, name string, traceID []byte, spanID []byte) pdata.Traces {
+func AddSpan(traces pdata.Traces, name string, traceID pdata.TraceID, spanID pdata.SpanID) pdata.Traces {
 	rspans := traces.ResourceSpans()
 	instSpans := rspans.At(0).InstrumentationLibrarySpans()
 	spans := instSpans.At(0).Spans()
@@ -71,51 +75,76 @@ func AddSpan(traces pdata.Traces, name string, traceID []byte, spanID []byte) pd
 }
 
 func TestStore(t *testing.T) {
-	traceID := []byte("0123456789abcdef")
-	spanID := []byte("01234567")
+	traceID := pdata.NewTraceID([16]byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+		0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F})
+	spanID := pdata.NewSpanID([8]byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07})
 	tests := []struct {
-		storage store
-		data    pdata.Traces
-		err     string
-		dropped int
-		caption string
+		storage         store
+		data            pdata.Traces
+		err             string
+		dropped         int
+		caption         string
+		metricStored    float64
+		metricNotStored float64
 	}{
 		{
 			caption: "nothing to store",
-			storage: store{Writer: spanWriter{}},
+			storage: store{Writer: spanWriter{}, storageNameTag: tag.Insert(storagemetrics.TagExporterName(), "memory")},
 			data:    traces(),
 			dropped: 0,
 		},
 		{
 			caption: "wrong data",
-			storage: store{Writer: spanWriter{}},
-			data:    AddSpan(traces(), "", nil, nil),
-			err:     "TraceID is nil",
+			storage: store{Writer: spanWriter{}, storageNameTag: tag.Insert(storagemetrics.TagExporterName(), "memory")},
+			data:    AddSpan(traces(), "", pdata.NewTraceID([16]byte{}), pdata.NewSpanID([8]byte{})),
+			err:     "Permanent error: OC span has an all zeros trace ID",
 			dropped: 1,
 		},
 		{
-			caption: "one error in writer",
-			storage: store{Writer: spanWriter{err: errors.New("could not store")}},
-			data:    AddSpan(AddSpan(traces(), "error", traceID, spanID), "", traceID, spanID),
-			dropped: 1,
-			err:     "could not store",
+			caption:         "one error in writer",
+			storage:         store{Writer: spanWriter{err: errors.New("could not store")}, storageNameTag: tag.Insert(storagemetrics.TagExporterName(), "memory")},
+			data:            AddSpan(AddSpan(traces(), "error", traceID, spanID), "", traceID, spanID),
+			dropped:         1,
+			err:             "could not store",
+			metricNotStored: 1,
+			metricStored:    1,
 		},
 		{
-			caption: "two errors in writer",
-			storage: store{Writer: spanWriter{err: errors.New("could not store")}},
-			data:    AddSpan(AddSpan(traces(), "error", traceID, spanID), "error", traceID, spanID),
-			dropped: 2,
-			err:     "[could not store; could not store]",
+			caption:         "two errors in writer",
+			storage:         store{Writer: spanWriter{err: errors.New("could not store")}, storageNameTag: tag.Insert(storagemetrics.TagExporterName(), "memory")},
+			data:            AddSpan(AddSpan(traces(), "error", traceID, spanID), "error", traceID, spanID),
+			dropped:         2,
+			err:             "[could not store; could not store]",
+			metricNotStored: 2,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.caption, func(t *testing.T) {
+			views := storagemetrics.MetricViews()
+			require.NoError(t, view.Register(views...))
+			defer view.Unregister(views...)
+
 			dropped, err := test.storage.traceDataPusher(context.Background(), test.data)
 			assert.Equal(t, test.dropped, dropped)
 			if test.err != "" {
 				assert.Contains(t, err.Error(), test.err)
 			} else {
 				require.NoError(t, err)
+			}
+
+			if test.metricStored > 0 {
+				viewData, err := view.RetrieveData(storagemetrics.StatSpansStoredCount().Name())
+				require.NoError(t, err)
+				require.Equal(t, 1, len(viewData))
+				distData := viewData[0].Data.(*view.SumData)
+				assert.Equal(t, test.metricStored, distData.Value)
+			}
+			if test.metricNotStored > 0 {
+				viewData, err := view.RetrieveData(storagemetrics.StatSpansNotStoredCount().Name())
+				require.NoError(t, err)
+				require.Equal(t, 1, len(viewData))
+				distData := viewData[0].Data.(*view.SumData)
+				assert.Equal(t, test.metricNotStored, distData.Value)
 			}
 		})
 	}
@@ -125,7 +154,7 @@ type spanWriter struct {
 	err error
 }
 
-func (w spanWriter) WriteSpan(span *model.Span) error {
+func (w spanWriter) WriteSpan(ctx context.Context, span *model.Span) error {
 	if span.GetOperationName() == "error" {
 		return w.err
 	}
@@ -139,7 +168,7 @@ func (spanWriter) Close() error {
 type noClosableWriter struct {
 }
 
-func (noClosableWriter) WriteSpan(span *model.Span) error {
+func (noClosableWriter) WriteSpan(ctx context.Context, span *model.Span) error {
 	return nil
 }
 

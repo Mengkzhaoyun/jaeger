@@ -18,17 +18,18 @@ import (
 	"fmt"
 	"strings"
 
-	"go.opentelemetry.io/collector/config"
+	"github.com/spf13/viper"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configgrpc"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configmodels"
 	"go.opentelemetry.io/collector/config/confignet"
-	"go.opentelemetry.io/collector/config/configprotocol"
 	"go.opentelemetry.io/collector/processor/batchprocessor"
-	"go.opentelemetry.io/collector/processor/queuedprocessor"
 	"go.opentelemetry.io/collector/processor/resourceprocessor"
 	"go.opentelemetry.io/collector/receiver/jaegerreceiver"
 	"go.opentelemetry.io/collector/receiver/zipkinreceiver"
+	"go.opentelemetry.io/collector/service"
+	"go.opentelemetry.io/collector/service/builder"
 
 	"github.com/jaegertracing/jaeger/cmd/opentelemetry/app/exporter/badgerexporter"
 	"github.com/jaegertracing/jaeger/cmd/opentelemetry/app/exporter/cassandraexporter"
@@ -36,8 +37,8 @@ import (
 	"github.com/jaegertracing/jaeger/cmd/opentelemetry/app/exporter/grpcpluginexporter"
 	"github.com/jaegertracing/jaeger/cmd/opentelemetry/app/exporter/kafkaexporter"
 	"github.com/jaegertracing/jaeger/cmd/opentelemetry/app/exporter/memoryexporter"
+	jaegerresource "github.com/jaegertracing/jaeger/cmd/opentelemetry/app/processor/resourceprocessor"
 	"github.com/jaegertracing/jaeger/cmd/opentelemetry/app/receiver/kafkareceiver"
-	"github.com/jaegertracing/jaeger/ports"
 )
 
 const (
@@ -61,19 +62,40 @@ type ComponentType int
 
 // ComponentSettings struct configures generation of the default config
 type ComponentSettings struct {
-	ComponentType  ComponentType
-	Factories      config.Factories
-	StorageType    string
-	ZipkinHostPort string
+	ComponentType ComponentType
+	Factories     component.Factories
+	StorageType   string
 }
 
-// CreateDefaultConfig creates default configuration.
-func (c ComponentSettings) CreateDefaultConfig() (*configmodels.Config, error) {
+// DefaultConfigFactory returns a service.ConfigFactory that merges jaeger and otel configs
+func (c *ComponentSettings) DefaultConfigFactory(jaegerViper *viper.Viper) service.ConfigFactory {
+	return func(otelViper *viper.Viper, f component.Factories) (*configmodels.Config, error) {
+		cfg, err := c.createDefaultConfig()
+		if err != nil {
+			return nil, err
+		}
+		if len(builder.GetConfigFile()) > 0 {
+			otelCfg, err := service.FileLoaderConfigFactory(otelViper, f)
+			if err != nil {
+				return nil, err
+			}
+			err = MergeConfigs(cfg, otelCfg)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		return cfg, nil
+	}
+}
+
+// createDefaultConfig creates default configuration.
+func (c ComponentSettings) createDefaultConfig() (*configmodels.Config, error) {
 	exporters, err := createExporters(c.ComponentType, c.StorageType, c.Factories)
 	if err != nil {
 		return nil, err
 	}
-	receivers := createReceivers(c.ComponentType, c.ZipkinHostPort, c.Factories)
+	receivers := createReceivers(c.ComponentType, c.Factories)
 	processors, processorNames := createProcessors(c.Factories)
 	hc := c.Factories.Extensions["health_check"].CreateDefaultConfig()
 	return &configmodels.Config{
@@ -95,26 +117,24 @@ func (c ComponentSettings) CreateDefaultConfig() (*configmodels.Config, error) {
 	}, nil
 }
 
-func createProcessors(factories config.Factories) (configmodels.Processors, []string) {
+func createProcessors(factories component.Factories) (configmodels.Processors, []string) {
 	processors := configmodels.Processors{}
 	var names []string
-	resource := factories.Processors["resource"].CreateDefaultConfig().(*resourceprocessor.Config)
-	if len(resource.Labels) > 0 {
+	resFactory := factories.Processors["resource"].(*jaegerresource.Factory)
+	if len(resFactory.GetTags()) > 0 {
+		resource := factories.Processors["resource"].CreateDefaultConfig().(*resourceprocessor.Config)
 		processors[resource.Name()] = resource
 		names = append(names, resource.Name())
 	}
 	batch := factories.Processors["batch"].CreateDefaultConfig().(*batchprocessor.Config)
 	processors[batch.Name()] = batch
 	names = append(names, batch.Name())
-	queuedRetry := factories.Processors["queued_retry"].CreateDefaultConfig().(*queuedprocessor.Config)
-	processors[queuedRetry.Name()] = queuedRetry
-	names = append(names, queuedRetry.Name())
 	return processors, names
 }
 
-func createReceivers(component ComponentType, zipkinHostPort string, factories config.Factories) configmodels.Receivers {
+func createReceivers(component ComponentType, factories component.Factories) configmodels.Receivers {
 	if component == Ingester {
-		kafkaReceiver := factories.Receivers[kafkareceiver.TypeStr].CreateDefaultConfig().(*kafkareceiver.Config)
+		kafkaReceiver := factories.Receivers[kafkareceiver.TypeStr].CreateDefaultConfig()
 		return configmodels.Receivers{
 			kafkaReceiver.Name(): kafkaReceiver,
 		}
@@ -142,15 +162,14 @@ func createReceivers(component ComponentType, zipkinHostPort string, factories c
 		"jaeger": jaeger,
 		"otlp":   factories.Receivers["otlp"].CreateDefaultConfig(),
 	}
-	if zipkinHostPort != "" && zipkinHostPort != ports.PortToHostPort(0) {
-		zipkin := factories.Receivers["zipkin"].CreateDefaultConfig().(*zipkinreceiver.Config)
-		zipkin.Endpoint = zipkinHostPort
+	zipkin := factories.Receivers["zipkin"].CreateDefaultConfig().(*zipkinreceiver.Config)
+	if zipkin.Endpoint != "" {
 		recvs["zipkin"] = zipkin
 	}
 	return recvs
 }
 
-func createExporters(component ComponentType, storageTypes string, factories config.Factories) (configmodels.Exporters, error) {
+func createExporters(component ComponentType, storageTypes string, factories component.Factories) (configmodels.Exporters, error) {
 	if component == Agent {
 		jaegerExporter := factories.Exporters["jaeger"]
 		return configmodels.Exporters{
@@ -174,7 +193,7 @@ func createExporters(component ComponentType, storageTypes string, factories con
 			exporters[elasticsearchexporter.TypeStr] = es
 		case "kafka":
 			kaf := factories.Exporters[kafkaexporter.TypeStr].CreateDefaultConfig()
-			exporters[kafkaexporter.TypeStr] = kaf
+			exporters["kafka"] = kaf
 		case "grpc-plugin":
 			grpcEx := factories.Exporters[grpcpluginexporter.TypeStr].CreateDefaultConfig()
 			exporters[grpcpluginexporter.TypeStr] = grpcEx
@@ -187,12 +206,12 @@ func createExporters(component ComponentType, storageTypes string, factories con
 
 func enableAgentUDPEndpoints(jaeger *jaegerreceiver.Config) {
 	if jaeger.ThriftCompact == nil {
-		jaeger.ThriftCompact = &configprotocol.ProtocolServerSettings{
+		jaeger.ThriftCompact = &confignet.TCPAddr{
 			Endpoint: udpThriftCompactEndpoint,
 		}
 	}
 	if jaeger.ThriftBinary == nil {
-		jaeger.ThriftBinary = &configprotocol.ProtocolServerSettings{
+		jaeger.ThriftBinary = &confignet.TCPAddr{
 			Endpoint: udpThriftBinaryEndpoint,
 		}
 	}

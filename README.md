@@ -2,13 +2,12 @@
 
 
 [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/1273/badge)](https://bestpractices.coreinfrastructure.org/projects/1273)
-[![Go Report Card](https://goreportcard.com/badge/github.com/jaegertracing/jaeger?style=flat-square)](https://goreportcard.com/report/github.com/jaegertracing/jaeger)
 [![Mentioned in Awesome Go](https://awesome.re/mentioned-badge-flat.svg)](https://github.com/avelino/awesome-go#performance)
 [![OpenTracing-1.0][ot-badge]](https://opentracing.io)
 
 [![Gitter chat][gitter-img]][gitter] [![Project+Community stats][community-badge]][community-stats]
 
-[![Build Status][ci-img]][ci] [![Coverage Status][cov-img]][cov] [![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fjaegertracing%2Fjaeger.svg?type=shield)](https://app.fossa.io/projects/git%2Bgithub.com%2Fjaegertracing%2Fjaeger?ref=badge_shield) 
+[![Build Status][ci-img]][ci] [![Coverage Status][cov-img]][cov] [![FOSSA Status](https://app.fossa.com/api/projects/custom%2B162%2Fgithub.com%2Fjaegertracing%2Fjaeger.svg?type=shield)](https://app.fossa.com/projects/custom%2B162%2Fgithub.com%2Fjaegertracing%2Fjaeger?ref=badge_shield)
 
 # Jaeger - a Distributed Tracing System
 
@@ -110,8 +109,7 @@ of routing the traffic from Zipkin libraries to the Jaeger backend.
 
 ### Deployment
 
-  * [Kubernetes templates](https://github.com/jaegertracing/jaeger-kubernetes)
-  * [OpenShift templates](https://github.com/jaegertracing/jaeger-openshift)
+  * [Jaeger Operator for Kubernetes](https://github.com/jaegertracing/jaeger-operator#getting-started)
 
 ### Components
 
@@ -132,6 +130,7 @@ See [CONTRIBUTING](./CONTRIBUTING.md).
 Below are the official maintainers of the Jaeger project. Please use `@jaegertracing/jaeger-maintainers` to tag them on issues / PRs.
 
 * [@black-adder](https://github.com/black-adder)
+* [@joe-elliott](https://github.com/joe-elliott)
 * [@jpkrohling](https://github.com/jpkrohling)
 * [@objectiser](https://github.com/objectiser)
 * [@pavolloffay](https://github.com/pavolloffay)
@@ -175,8 +174,8 @@ If you would like to add your organization to the list, please comment on our
 [doc]: https://jaegertracing.io/docs/
 [godoc-img]: https://godoc.org/github.com/jaegertracing/jaeger?status.svg
 [godoc]: https://godoc.org/github.com/jaegertracing/jaeger
-[ci-img]: https://travis-ci.org/jaegertracing/jaeger.svg?branch=master
-[ci]: https://travis-ci.org/jaegertracing/jaeger
+[ci-img]: https://travis-ci.com/jaegertracing/jaeger.svg?branch=master
+[ci]: https://travis-ci.com/jaegertracing/jaeger
 [cov-img]: https://codecov.io/gh/jaegertracing/jaeger/branch/master/graph/badge.svg
 [cov]: https://codecov.io/gh/jaegertracing/jaeger/branch/master/
 [dapper]: https://research.google.com/pubs/pub36356.html
@@ -187,5 +186,3 @@ If you would like to add your organization to the list, please comment on our
 [hotrod-tutorial]: https://medium.com/@YuriShkuro/take-opentracing-for-a-hotrod-ride-f6e3141f7941
 [gitter]: https://gitter.im/jaegertracing/Lobby
 [gitter-img]: https://img.shields.io/badge/gitter-join%20chat%20%E2%86%92-brightgreen.svg
-
-[//]: # (md-to-godoc-ignore)
